@@ -1,0 +1,86 @@
+name: tailscale-blade-mcp
+display_name: Tailscale
+description: >
+  Network monitoring and security for Tailscale tailnets.
+  Device inventory, ACL policy review, DNS configuration, auth key auditing,
+  user management, and configuration audit logs with token-efficient output.
+author: groupthink-dev
+version: 0.1.0
+license: MIT
+homepage: https://github.com/groupthink-dev/tailscale-blade-mcp
+repository: https://github.com/groupthink-dev/tailscale-blade-mcp
+
+contract: vpn-v1
+multi_instance: true
+
+runtime:
+  command: uv
+  args:
+    - --directory
+    - "{{install_path}}"
+    - run
+    - tailscale-blade-mcp
+  transport: stdio
+
+auth:
+  model: api_key
+  fields:
+    - key: TAILSCALE_API_KEY
+      label: API Key
+      type: password
+      required: true
+      placeholder: "tskey-api-..."
+      help: Tailscale API access token or OAuth bearer token
+    - key: TAILSCALE_TAILNET
+      label: Tailnet
+      type: string
+      required: false
+      default: "-"
+      help: "Tailnet name or '-' for auto-detect (default: auto-detect)"
+    - key: TAILSCALE_WRITE_ENABLED
+      label: Enable Write Operations
+      type: boolean
+      required: false
+      default: "false"
+      help: Enable device authorization, tagging, key management, route approval
+
+  multi_instance:
+    label: Tailnets
+    key_prefix: TAILSCALE
+    per_instance_fields:
+      - key: API_KEY
+        label: API Key
+        type: password
+        required: true
+      - key: TAILNET
+        label: Tailnet
+        type: string
+        required: false
+        default: "-"
+
+test:
+  command: uv
+  args:
+    - --directory
+    - "{{install_path}}"
+    - run
+    - pytest
+    - tests/
+    - -m
+    - not e2e
+    - -v
+  env:
+    TAILSCALE_API_KEY: "tskey-api-test-placeholder"
+
+help:
+  setup: |
+    1. Go to the Tailscale admin console (https://login.tailscale.com/admin/settings/keys)
+    2. Generate an API access token (Settings > Keys > Generate access token)
+    3. For automation, create an OAuth client with appropriate scopes instead
+    4. Paste the token as the API Key
+    5. Write operations are disabled by default — enable only if needed
+  troubleshooting: |
+    - "Authentication failed": Check your API key is valid and not expired
+    - "Forbidden": Your token may lack permissions for this endpoint (check OAuth scopes)
+    - "Not found": Verify the device/key ID exists (use ts_devices or ts_keys first)
+    - For OAuth: ensure scopes include the resources you need (devices, dns, acl, etc.)
