@@ -5,7 +5,7 @@ description: >
   Device inventory, ACL policy review, DNS configuration, auth key auditing,
   user management, and configuration audit logs with token-efficient output.
 author: groupthink-dev
-version: 0.1.0
+version: 0.1.1
 license: MIT
 homepage: https://github.com/groupthink-dev/tailscale-blade-mcp
 repository: https://github.com/groupthink-dev/tailscale-blade-mcp
@@ -13,7 +13,7 @@ tier: certified
 author_type: first-party
 readiness: stub
 
-contract: vpn-v1
+contract: overlay-network-v1
 multi_instance: true
 
 runtime:
