@@ -6,7 +6,44 @@ One line per item for list views, structured blocks for detail views.
 
 from __future__ import annotations
 
+import json
 from typing import Any
+
+# ---------------------------------------------------------------------------
+# DD-338 Phase A.1 — Track 3 _meta envelope
+# ---------------------------------------------------------------------------
+#
+# Canonical wire shape (architect amendment 2026-05-21):
+#     <existing payload>
+#
+#     _meta: {"matched_total": 14, "returned": 4, ...}
+#
+# Single JSON line, appended after \n\n. Assembler regex:
+#     \n\n_meta: (\{.*\})$
+#
+# Required fields: matched_total, returned, filtered_by, latency_ms.
+# Optional: redactions, next_cursor, error_notes.
+
+
+def format_meta_envelope(meta: dict[str, Any]) -> str:
+    """Render a Track 3 _meta envelope as a JSON-tail line.
+
+    Output: `_meta: {…}` (no leading newlines — caller appends with \n\n).
+    JSON is single-line (no indent), preserves key order via Python dict
+    insertion order. Required fields are not validated here — callers
+    must populate them.
+    """
+    return "_meta: " + json.dumps(meta, separators=(",", ":"), ensure_ascii=False)
+
+
+def append_meta_envelope(payload: str, meta: dict[str, Any]) -> str:
+    """Append a _meta envelope to an existing payload using the canonical
+    \n\n separator. Handles the empty-payload case gracefully (no leading
+    blank line on top-level empty results)."""
+    envelope = format_meta_envelope(meta)
+    if not payload:
+        return envelope
+    return f"{payload}\n\n{envelope}"
 
 
 def _time_ago(iso_str: str | None) -> str:
