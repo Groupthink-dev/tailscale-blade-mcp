@@ -9,14 +9,17 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Callable
 from typing import Annotated, Any
 
 from fastmcp import FastMCP
 from pydantic import Field
 from stallari_mcp_helpers import (
     Pattern,
-    compute_domain_hint,
     load_patterns_from_yaml,
+)
+from stallari_mcp_helpers import (
+    compute_domain_hint as _canonical_compute_domain_hint,
 )
 
 from tailscale_blade_mcp.client import TailscaleClient, TailscaleError
@@ -176,6 +179,55 @@ def _load_blade_config(blade_id: str) -> list[Pattern]:
 _PATTERNS: list[Pattern] = _load_blade_config(_BLADE_ID)
 
 
+def _tailscale_field_projector(record: dict[str, Any], field: str) -> Any:
+    """Project a Tailscale record onto a logical ``Pattern.field`` name.
+
+    Tailscale Devices API record shape (subset)::
+
+        {
+          "id": "12345",
+          "nodeId": "n...",
+          "name": "host.tailnet.ts.net",
+          "hostname": "host",
+          "addresses": ["100.x.y.z"],
+          "user": "user@example.com",
+          "tags": ["tag:server", "tag:prod"],
+          "os": "linux",
+          ...
+        }
+
+    Supported field names (case-insensitive): ``hostname``, ``name``,
+    ``tags`` (list), ``user``, ``addresses`` (list), ``os``. Auth-key
+    records expose top-level ``tags`` (post-flatten); user records expose
+    ``loginName`` mapped from ``user`` and ``displayName`` as scalar; audit
+    entries expose ``actor`` / ``target.id`` shapes (best-effort projector
+    falls back to ``None`` for unknown field names so dispatch silently
+    skips the rule instead of crashing).
+    """
+    if not isinstance(record, dict):
+        return None
+    f = field.lower()
+    if f == "hostname":
+        return record.get("hostname")
+    if f == "name":
+        return record.get("name")
+    if f == "tags":
+        v = record.get("tags")
+        return v if isinstance(v, list) else None
+    if f == "user":
+        # Device records: ``user`` is a login email string.
+        # User records: ``loginName`` is the analogous field.
+        return record.get("user") or record.get("loginName")
+    if f == "addresses":
+        v = record.get("addresses")
+        return v if isinstance(v, list) else None
+    if f == "os":
+        return record.get("os")
+    if f == "id":
+        return record.get("nodeId") or record.get("id")
+    return None
+
+
 def _record_id(rec: dict[str, Any]) -> str | None:
     """Resolve the stable record ID for the ``domain_hints`` map key.
 
@@ -195,15 +247,52 @@ def _record_id(rec: dict[str, Any]) -> str | None:
     return None
 
 
+def compute_domain_hint(
+    record: dict[str, Any],
+    patterns: list[Pattern],
+    field_projector: Callable[[dict[str, Any], str], Any] = _tailscale_field_projector,
+) -> str | None:
+    """Tailscale-specific wrapper around the canonical ``compute_domain_hint``.
+
+    Bridges the canonical dot-path field-resolution model to Tailscale's
+    record-shape projector. The projector handles:
+
+      (a) case-insensitive field lookup (``Pattern.field`` may be authored
+          in any case; ``_tailscale_field_projector`` lowercases internally),
+      (b) logical-name aliasing (``user`` reads ``user`` on devices but
+          ``loginName`` on user records; ``id`` prefers ``nodeId``),
+      (c) best-effort fallback for unknown fields ⇒ ``None`` so dispatch
+          silently skips the rule.
+
+    Pre-projects each pattern's referenced field via ``field_projector``
+    and seeds the result as a top-level key on a copy of the record so
+    the canonical helper sees a uniform flat shape (its dot-path
+    navigation cannot do case-insensitive lookup or logical aliasing).
+
+    Authored against the same three-arg shape the blade has used since
+    DD-338 A.2.dom.c so existing tests + callers don't change.
+    """
+    if not patterns:
+        return None
+    projected = dict(record)
+    seen: set[str] = set()
+    for pattern in patterns:
+        field = pattern.field
+        if field in seen:
+            continue
+        seen.add(field)
+        value = field_projector(record, field)
+        if value is not None:
+            projected[field] = value
+    result: str | None = _canonical_compute_domain_hint(projected, patterns)
+    return result
+
+
 def _compute_domain_hints_for_records(records: list[dict[str, Any]]) -> dict[str, str]:
     """Apply ``_PATTERNS`` to each record; return ``{record_id: domain}`` map.
 
     Records lacking a domain match are omitted. Empty pattern list ⇒ empty
     dict ⇒ caller suppresses the ``domain_hints`` envelope key.
-
-    DD-338 Phase E.python: delegates to ``stallari_mcp_helpers.compute_domain_hint``
-    which uses dot-path field resolution (e.g. ``name``, ``tags``) instead
-    of the retired per-blade field projector.
     """
     if not _PATTERNS:
         return {}
@@ -212,7 +301,7 @@ def _compute_domain_hints_for_records(records: list[dict[str, Any]]) -> dict[str
         rid = _record_id(rec)
         if rid is None:
             continue
-        hint = compute_domain_hint(rec, _PATTERNS)
+        hint = compute_domain_hint(rec, _PATTERNS, _tailscale_field_projector)
         if hint is not None:
             out[rid] = hint
     return out

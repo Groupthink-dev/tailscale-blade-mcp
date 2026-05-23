@@ -19,12 +19,28 @@ Stallari platform (`major.macro.minor.patch`).
 - Rename 5 `append_meta_envelope(payload, meta_dict)` call-sites in `server.py`
   to the canonical `meta_envelope(**kwargs)` + `append_meta(payload, envelope)`
   pattern.
-- Engine semantics: `compute_domain_hint` now uses canonical dot-path field
-  resolution (e.g. `name`, `tags`) instead of a per-blade field projector;
-  the `_tailscale_field_projector` helper was removed. Existing YAML configs
-  relying on the projector's logical aliases need re-authoring against the
-  dot-path schema. The DD-338 A.2.dom.a substrate has not yet shipped
-  user-facing pattern configs, so no in-the-wild migration is required.
+- Engine semantics: `compute_domain_hint` is now a Tailscale-specific local
+  wrapper in `server.py` that pre-projects each pattern's referenced field
+  via `_tailscale_field_projector` and then delegates to
+  `stallari_mcp_helpers.compute_domain_hint` (canonical 2-arg). The wrapper
+  preserves the 3-arg shape the blade has used since DD-338 A.2.dom.c so
+  existing call-sites and tests don't change. The projector continues to
+  handle (a) case-insensitive field lookup, (b) `loginName` → `user`
+  aliasing across device vs user records, and (c) `nodeId` / `id` fallback
+  — none of which the canonical lib's dot-path navigation can express on
+  its own.
+
+### Fixed
+- **Architect-review correction (post-merge of the original Spec B Cluster
+  C flip):** restore `_tailscale_field_projector` and add a local
+  `compute_domain_hint` wrapper. The original flip dropped the projector
+  and delegated directly to the canonical 2-arg helper — that produced a
+  silent behavioural regression for non-lowercase pattern fields,
+  `loginName`-only user records, and `nodeId`-only device records. Mirrors
+  the pattern landed in `home-assistant-blade-mcp` PR #5. Restored
+  `tests/test_domain_hint.py` covering case-insensitive field lookup,
+  `loginName` aliasing, `nodeId`/`id` fallback, glob/contains/equals ops,
+  and the wrapper's default-projector arg.
 - **`_meta.redactions` semantic change.** The local helper allowed `redactions`
   to be a positive integer count of filtered-out records. The canonical lib
   models `redactions` as `list[str]` reason codes (defaulting to `[]`). Tailscale
