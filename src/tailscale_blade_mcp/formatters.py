@@ -6,14 +6,16 @@ One line per item for list views, structured blocks for detail views.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
+from stallari_mcp_helpers import append_meta as _lib_append_meta
+from stallari_mcp_helpers import meta_envelope as _lib_meta_envelope
+
 # ---------------------------------------------------------------------------
-# DD-338 Phase A.1 — Track 3 _meta envelope
+# DD-338 Phase E.python — Track 3 _meta envelope (delegated to canonical lib)
 # ---------------------------------------------------------------------------
 #
-# Canonical wire shape (architect amendment 2026-05-21):
+# Wire shape (locked by stallari_mcp_helpers.audit_envelope):
 #     <existing payload>
 #
 #     _meta: {"matched_total": 14, "returned": 4, ...}
@@ -21,29 +23,44 @@ from typing import Any
 # Single JSON line, appended after \n\n. Assembler regex:
 #     \n\n_meta: (\{.*\})$
 #
-# Required fields: matched_total, returned, filtered_by, latency_ms.
-# Optional: redactions, next_cursor, error_notes.
+# The canonical lib alphabetically sorts ``filtered_by`` and uses tight
+# JSON separators ``(",", ":")``.
 
 
-def format_meta_envelope(meta: dict[str, Any]) -> str:
-    """Render a Track 3 _meta envelope as a JSON-tail line.
+def meta_envelope(
+    *,
+    matched_total: int,
+    returned: int,
+    latency_ms: int,
+    filtered_by: list[str] | None = None,
+    redactions: list[str] | None = None,
+    next_cursor: str | None = None,
+    error_notes: list[str] | None = None,
+    domain_hints: dict[str, str] | None = None,
+) -> str:
+    """Typed re-export of ``stallari_mcp_helpers.meta_envelope``.
 
-    Output: `_meta: {…}` (no leading newlines — caller appends with \n\n).
-    JSON is single-line (no indent), preserves key order via Python dict
-    insertion order. Required fields are not validated here — callers
-    must populate them.
+    The upstream package ships without a ``py.typed`` marker (v0.1.0),
+    so mypy treats its return as ``Any``. This wrapper restores the
+    ``str`` annotation locally so callers don't trip ``no-any-return``.
     """
-    return "_meta: " + json.dumps(meta, separators=(",", ":"), ensure_ascii=False)
+    return str(
+        _lib_meta_envelope(
+            matched_total=matched_total,
+            returned=returned,
+            latency_ms=latency_ms,
+            filtered_by=filtered_by,
+            redactions=redactions,
+            next_cursor=next_cursor,
+            error_notes=error_notes,
+            domain_hints=domain_hints,
+        )
+    )
 
 
-def append_meta_envelope(payload: str, meta: dict[str, Any]) -> str:
-    """Append a _meta envelope to an existing payload using the canonical
-    \n\n separator. Handles the empty-payload case gracefully (no leading
-    blank line on top-level empty results)."""
-    envelope = format_meta_envelope(meta)
-    if not payload:
-        return envelope
-    return f"{payload}\n\n{envelope}"
+def append_meta(body: str, meta_line: str) -> str:
+    """Typed re-export of ``stallari_mcp_helpers.append_meta`` (see ``meta_envelope`` rationale)."""
+    return str(_lib_append_meta(body, meta_line))
 
 
 def _time_ago(iso_str: str | None) -> str:

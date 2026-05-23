@@ -13,15 +13,15 @@ from typing import Annotated, Any
 
 from fastmcp import FastMCP
 from pydantic import Field
-
-from tailscale_blade_mcp.client import TailscaleClient, TailscaleError
-from tailscale_blade_mcp.domain_hint import (
+from stallari_mcp_helpers import (
     Pattern,
     compute_domain_hint,
     load_patterns_from_yaml,
 )
+
+from tailscale_blade_mcp.client import TailscaleClient, TailscaleError
 from tailscale_blade_mcp.formatters import (
-    append_meta_envelope,
+    append_meta,
     format_acl,
     format_acl_validation,
     format_audit_log,
@@ -33,6 +33,7 @@ from tailscale_blade_mcp.formatters import (
     format_key_list,
     format_user_list,
     format_webhook_list,
+    meta_envelope,
 )
 from tailscale_blade_mcp.models import (
     apply_scope_filter,
@@ -167,60 +168,12 @@ def _load_blade_config(blade_id: str) -> list[Pattern]:
             yaml_str = f.read()
     except OSError:
         return []
-    return load_patterns_from_yaml(yaml_str)
+    patterns: list[Pattern] = load_patterns_from_yaml(yaml_str)
+    return patterns
 
 
 # Cached at module load; re-launch the blade to pick up config edits at v1.
 _PATTERNS: list[Pattern] = _load_blade_config(_BLADE_ID)
-
-
-def _tailscale_field_projector(record: dict[str, Any], field: str) -> Any:
-    """Project a Tailscale record onto a logical ``Pattern.field`` name.
-
-    Tailscale Devices API record shape (subset)::
-
-        {
-          "id": "12345",
-          "nodeId": "n...",
-          "name": "host.tailnet.ts.net",
-          "hostname": "host",
-          "addresses": ["100.x.y.z"],
-          "user": "user@example.com",
-          "tags": ["tag:server", "tag:prod"],
-          "os": "linux",
-          ...
-        }
-
-    Supported field names (case-insensitive): ``hostname``, ``name``,
-    ``tags`` (list), ``user``, ``addresses`` (list), ``os``. Auth-key
-    records expose top-level ``tags`` (post-flatten); user records expose
-    ``loginName`` mapped from ``user`` and ``displayName`` as scalar; audit
-    entries expose ``actor`` / ``target.id`` shapes (best-effort projector
-    falls back to ``None`` for unknown field names so dispatch silently
-    skips the rule instead of crashing).
-    """
-    if not isinstance(record, dict):
-        return None
-    f = field.lower()
-    if f == "hostname":
-        return record.get("hostname")
-    if f == "name":
-        return record.get("name")
-    if f == "tags":
-        v = record.get("tags")
-        return v if isinstance(v, list) else None
-    if f == "user":
-        # Device records: ``user`` is a login email string.
-        # User records: ``loginName`` is the analogous field.
-        return record.get("user") or record.get("loginName")
-    if f == "addresses":
-        v = record.get("addresses")
-        return v if isinstance(v, list) else None
-    if f == "os":
-        return record.get("os")
-    if f == "id":
-        return record.get("nodeId") or record.get("id")
-    return None
 
 
 def _record_id(rec: dict[str, Any]) -> str | None:
@@ -247,6 +200,10 @@ def _compute_domain_hints_for_records(records: list[dict[str, Any]]) -> dict[str
 
     Records lacking a domain match are omitted. Empty pattern list ⇒ empty
     dict ⇒ caller suppresses the ``domain_hints`` envelope key.
+
+    DD-338 Phase E.python: delegates to ``stallari_mcp_helpers.compute_domain_hint``
+    which uses dot-path field resolution (e.g. ``name``, ``tags``) instead
+    of the retired per-blade field projector.
     """
     if not _PATTERNS:
         return {}
@@ -255,7 +212,7 @@ def _compute_domain_hints_for_records(records: list[dict[str, Any]]) -> dict[str
         rid = _record_id(rec)
         if rid is None:
             continue
-        hint = compute_domain_hint(rec, _PATTERNS, _tailscale_field_projector)
+        hint = compute_domain_hint(rec, _PATTERNS)
         if hint is not None:
             out[rid] = hint
     return out
@@ -316,20 +273,17 @@ async def ts_devices(
         matched_total = len(devices)
         filtered, scope_tag_list = apply_scope_filter(devices, scope)
         returned = len(filtered)
-        redactions = matched_total - returned
         payload = format_device_list(filtered)
         latency_ms = int((time.monotonic() - started) * 1000)
-        meta: dict[str, Any] = {
-            "matched_total": matched_total,
-            "returned": returned,
-            "filtered_by": _build_filtered_by(scope, scope_tag_list),
-            "redactions": redactions,
-            "latency_ms": latency_ms,
-        }
         domain_hints = _compute_domain_hints_for_records(filtered)
-        if domain_hints:
-            meta["domain_hints"] = domain_hints
-        return append_meta_envelope(payload, meta)
+        envelope = meta_envelope(
+            matched_total=matched_total,
+            returned=returned,
+            latency_ms=latency_ms,
+            filtered_by=_build_filtered_by(scope, scope_tag_list),
+            domain_hints=domain_hints or None,
+        )
+        return append_meta(payload, envelope)
     except TailscaleError as e:
         return _error_response(e)
 
@@ -350,14 +304,13 @@ async def ts_device(
         device = await _get_client().get_device(device_id)
         payload = format_device_detail(device)
         latency_ms = int((time.monotonic() - started) * 1000)
-        meta = {
-            "matched_total": 1,
-            "returned": 1,
-            "filtered_by": _build_filtered_by(None, [], {"device_id": device_id}),
-            "redactions": 0,
-            "latency_ms": latency_ms,
-        }
-        return append_meta_envelope(payload, meta)
+        envelope = meta_envelope(
+            matched_total=1,
+            returned=1,
+            latency_ms=latency_ms,
+            filtered_by=_build_filtered_by(None, [], {"device_id": device_id}),
+        )
+        return append_meta(payload, envelope)
     except TailscaleError as e:
         return _error_response(e)
 
@@ -381,14 +334,13 @@ async def ts_device_routes(
         # Union cardinality — discrete entries surfaced in the formatted payload.
         union_count = len(set(advertised) | set(enabled))
         latency_ms = int((time.monotonic() - started) * 1000)
-        meta: dict[str, Any] = {
-            "matched_total": union_count,
-            "returned": union_count,
-            "filtered_by": _build_filtered_by(None, [], {"device_id": device_id}),
-            "redactions": 0,
-            "latency_ms": latency_ms,
-        }
-        return append_meta_envelope(payload, meta)
+        envelope = meta_envelope(
+            matched_total=union_count,
+            returned=union_count,
+            latency_ms=latency_ms,
+            filtered_by=_build_filtered_by(None, [], {"device_id": device_id}),
+        )
+        return append_meta(payload, envelope)
     except TailscaleError as e:
         return _error_response(e)
 
@@ -498,20 +450,17 @@ async def ts_keys(
         matched_total = len(keys_with_top_tags)
         filtered, scope_tag_list = apply_scope_filter(keys_with_top_tags, scope)
         returned = len(filtered)
-        redactions = matched_total - returned
         payload = format_key_list(filtered)
         latency_ms = int((time.monotonic() - started) * 1000)
-        meta: dict[str, Any] = {
-            "matched_total": matched_total,
-            "returned": returned,
-            "filtered_by": _build_filtered_by(scope, scope_tag_list),
-            "redactions": redactions,
-            "latency_ms": latency_ms,
-        }
         domain_hints = _compute_domain_hints_for_records(filtered)
-        if domain_hints:
-            meta["domain_hints"] = domain_hints
-        return append_meta_envelope(payload, meta)
+        envelope = meta_envelope(
+            matched_total=matched_total,
+            returned=returned,
+            latency_ms=latency_ms,
+            filtered_by=_build_filtered_by(scope, scope_tag_list),
+            domain_hints=domain_hints or None,
+        )
+        return append_meta(payload, envelope)
     except TailscaleError as e:
         return _error_response(e)
 
@@ -600,14 +549,13 @@ async def ts_audit_log(
         if scope is None:
             payload = format_audit_log(entries)
             latency_ms = int((time.monotonic() - started) * 1000)
-            meta = {
-                "matched_total": matched_total,
-                "returned": matched_total,
-                "filtered_by": _build_filtered_by(None, [], {"count": count}),
-                "redactions": 0,
-                "latency_ms": latency_ms,
-            }
-            return append_meta_envelope(payload, meta)
+            envelope = meta_envelope(
+                matched_total=matched_total,
+                returned=matched_total,
+                latency_ms=latency_ms,
+                filtered_by=_build_filtered_by(None, [], {"count": count}),
+            )
+            return append_meta(payload, envelope)
 
         # Secondary fetch: device-tag map keyed by both nodeId and legacy id.
         # An entry's target.id may be either; index by both to maximise hits.
@@ -641,17 +589,15 @@ async def ts_audit_log(
                     filtered.append(entry)
 
         returned = len(filtered)
-        redactions = matched_total - returned
         payload = format_audit_log(filtered)
         latency_ms = int((time.monotonic() - started) * 1000)
-        meta = {
-            "matched_total": matched_total,
-            "returned": returned,
-            "filtered_by": _build_filtered_by(scope, sorted(scope_tags), {"count": count}),
-            "redactions": redactions,
-            "latency_ms": latency_ms,
-        }
-        return append_meta_envelope(payload, meta)
+        envelope = meta_envelope(
+            matched_total=matched_total,
+            returned=returned,
+            latency_ms=latency_ms,
+            filtered_by=_build_filtered_by(scope, sorted(scope_tags), {"count": count}),
+        )
+        return append_meta(payload, envelope)
     except TailscaleError as e:
         return _error_response(e)
 
