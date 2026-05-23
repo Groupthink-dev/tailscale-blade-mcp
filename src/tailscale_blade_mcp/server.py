@@ -366,10 +366,29 @@ async def ts_device(
 async def ts_device_routes(
     device_id: Annotated[str, Field(description="Device nodeId (from ts_devices)")],
 ) -> str:
-    """Routes for a device: advertised subnets, approved/unapproved status."""
+    """Routes for a device: advertised subnets, approved/unapproved status.
+
+    Emits a DD-338 ``_meta`` envelope (``audit_surface: structured``) disclosing
+    the ``device_id=`` server-side discrimination + the routes-row cardinality
+    (advertised + enabled, union).
+    """
+    started = time.monotonic()
     try:
         routes = await _get_client().get_device_routes(device_id)
-        return format_device_routes(routes)
+        payload = format_device_routes(routes)
+        advertised = routes.get("advertisedRoutes", []) or []
+        enabled = routes.get("enabledRoutes", []) or []
+        # Union cardinality — discrete entries surfaced in the formatted payload.
+        union_count = len(set(advertised) | set(enabled))
+        latency_ms = int((time.monotonic() - started) * 1000)
+        meta: dict[str, Any] = {
+            "matched_total": union_count,
+            "returned": union_count,
+            "filtered_by": _build_filtered_by(None, [], {"device_id": device_id}),
+            "redactions": 0,
+            "latency_ms": latency_ms,
+        }
+        return append_meta_envelope(payload, meta)
     except TailscaleError as e:
         return _error_response(e)
 

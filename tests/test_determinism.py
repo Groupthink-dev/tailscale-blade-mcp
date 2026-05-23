@@ -6,13 +6,14 @@ upstream. Sort-key correctness cases verify the canonical key is honoured.
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 import tailscale_blade_mcp.server as server_module
-
 
 N_RUNS = 5
 
@@ -271,3 +272,72 @@ class TestTsWebhooksDeterministic:
             mock_gc.return_value = mock_client
             out = await server_module.ts_webhooks()
         assert out.index("wh_aaa") < out.index("wh_zzz")
+
+
+# ---------------------------------------------------------------------------
+# DD-338 Phase C Wave 2 — ts_device_routes _meta envelope + determinism
+# ---------------------------------------------------------------------------
+
+
+_META_RE = re.compile(r"\n\n_meta: (\{.*\})$", re.DOTALL)
+
+
+def _split_meta(text: str) -> tuple[str, dict[str, Any]]:
+    m = _META_RE.search(text)
+    assert m is not None, f"_meta envelope not found in:\n{text!r}"
+    return text[: m.start()], json.loads(m.group(1))
+
+
+class TestTsDeviceRoutesMeta:
+    @pytest.mark.asyncio
+    async def test_meta_envelope_shape(self, mock_env: None) -> None:
+        routes = {
+            "advertisedRoutes": ["10.0.0.0/24", "192.168.1.0/24"],
+            "enabledRoutes": ["10.0.0.0/24"],
+        }
+        with patch.object(server_module, "_get_client") as mock_gc:
+            mock_client = AsyncMock()
+            mock_client.get_device_routes.return_value = routes
+            mock_gc.return_value = mock_client
+            out = await server_module.ts_device_routes(device_id="nABC123")
+        _payload, meta = _split_meta(out)
+        assert isinstance(meta["matched_total"], int)
+        assert isinstance(meta["returned"], int)
+        assert isinstance(meta["filtered_by"], list)
+        assert isinstance(meta["latency_ms"], int)
+
+    @pytest.mark.asyncio
+    async def test_filtered_by_contains_device_id(self, mock_env: None) -> None:
+        routes = {"advertisedRoutes": [], "enabledRoutes": []}
+        with patch.object(server_module, "_get_client") as mock_gc:
+            mock_client = AsyncMock()
+            mock_client.get_device_routes.return_value = routes
+            mock_gc.return_value = mock_client
+            out = await server_module.ts_device_routes(device_id="nABC123")
+        _payload, meta = _split_meta(out)
+        assert "device_id=nABC123" in meta["filtered_by"]
+
+
+class TestTsDeviceRoutesDeterministic:
+    @pytest.mark.asyncio
+    async def test_byte_equal_n3(self, mock_env: None) -> None:
+        routes = {
+            "advertisedRoutes": ["10.0.0.0/24", "192.168.1.0/24"],
+            "enabledRoutes": ["10.0.0.0/24"],
+        }
+        outputs: list[str] = []
+        for _ in range(3):
+            with patch.object(server_module, "_get_client") as mock_gc:
+                mock_client = AsyncMock()
+                mock_client.get_device_routes.return_value = dict(routes)
+                mock_gc.return_value = mock_client
+                outputs.append(await server_module.ts_device_routes(device_id="nABC123"))
+        # Strip latency_ms for byte-equal compare
+        normalised = []
+        for o in outputs:
+            payload, meta = _split_meta(o)
+            meta.pop("latency_ms", None)
+            normalised.append(payload + "\n\n_meta: " + json.dumps(meta, sort_keys=True))
+        first = normalised[0]
+        for i, o in enumerate(normalised[1:], start=1):
+            assert o == first, f"Non-deterministic on run {i}"
