@@ -15,8 +15,8 @@ import respx
 from httpx import Response
 
 from tailscale_blade_mcp.formatters import (
-    append_meta_envelope,
-    format_meta_envelope,
+    append_meta,
+    meta_envelope,
 )
 from tailscale_blade_mcp.models import (
     apply_scope_filter,
@@ -147,42 +147,41 @@ class TestApplyScopeFilter:
 
 
 class TestMetaEnvelope:
-    def test_format_meta_envelope_shape(self) -> None:
-        meta = {
-            "matched_total": 14,
-            "returned": 4,
-            "filtered_by": ["scope=infrastructure", "tags=tag:groupthink-infra"],
-            "redactions": 10,
-            "latency_ms": 234,
-        }
-        rendered = format_meta_envelope(meta)
+    def test_meta_envelope_shape(self) -> None:
+        rendered = meta_envelope(
+            matched_total=14,
+            returned=4,
+            latency_ms=234,
+            filtered_by=["scope=infrastructure", "tags=tag:groupthink-infra"],
+        )
         assert rendered.startswith("_meta: ")
         # Body must parse as JSON.
         parsed = json.loads(rendered[len("_meta: ") :])
         assert parsed["matched_total"] == 14
-        assert parsed["filtered_by"] == [
-            "scope=infrastructure",
-            "tags=tag:groupthink-infra",
-        ]
+        # Canonical builder alphabetically sorts filtered_by.
+        assert parsed["filtered_by"] == sorted(
+            ["scope=infrastructure", "tags=tag:groupthink-infra"]
+        )
 
     def test_append_envelope_uses_double_newline(self) -> None:
-        out = append_meta_envelope(
-            "payload-line-1\npayload-line-2",
-            {"matched_total": 1, "returned": 1, "filtered_by": [], "latency_ms": 5},
-        )
+        envelope = meta_envelope(matched_total=1, returned=1, latency_ms=5, filtered_by=[])
+        out = append_meta("payload-line-1\npayload-line-2", envelope)
         match = META_RE.search(out)
         assert match is not None
         body = json.loads(match.group(1))
         assert body["matched_total"] == 1
 
     def test_append_envelope_empty_payload(self) -> None:
-        out = append_meta_envelope(
-            "",
-            {"matched_total": 0, "returned": 0, "filtered_by": [], "latency_ms": 1},
-        )
-        # No leading blank line on empty payloads — envelope alone.
-        assert out.startswith("_meta: ")
-        assert not out.startswith("\n")
+        # DD-338 Phase E.python: canonical append_meta always joins body+\n\n+envelope.
+        # The original local helper short-circuited on empty body; the canonical lib
+        # emits the leading \n\n unconditionally. The assembler-side regex
+        # r"\n\n_meta: (\{.*\})$" still matches at end-of-string in either case.
+        envelope = meta_envelope(matched_total=0, returned=0, latency_ms=1, filtered_by=[])
+        out = append_meta("", envelope)
+        match = META_RE.search(out)
+        assert match is not None
+        body = json.loads(match.group(1))
+        assert body["matched_total"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +322,11 @@ class TestTsDevicesScope:
         meta = _parse_meta(text)
         assert meta["matched_total"] == 5
         assert meta["returned"] == 5
-        assert meta["redactions"] == 0
+        # DD-338 Phase E.python: canonical lib treats redactions as list[str] of
+        # reason codes; the prior integer count is recoverable from
+        # matched_total - returned. Tailscale call-sites pass redactions=[].
+        assert meta["redactions"] == []
+        assert meta["matched_total"] - meta["returned"] == 0
         assert meta["filtered_by"] == []
         assert "latency_ms" in meta
 
@@ -343,7 +346,8 @@ class TestTsDevicesScope:
         meta = _parse_meta(text)
         assert meta["matched_total"] == 5
         assert meta["returned"] == 2
-        assert meta["redactions"] == 3
+        assert meta["redactions"] == []
+        assert meta["matched_total"] - meta["returned"] == 3
         assert "scope=infrastructure" in meta["filtered_by"]
         # tags facet present with sorted tag list joined by ","
         tags_facet = [f for f in meta["filtered_by"] if f.startswith("tags=")]
@@ -431,7 +435,11 @@ class TestTsDeviceSingle:
         meta = _parse_meta(text)
         assert meta["matched_total"] == 1
         assert meta["returned"] == 1
-        assert meta["redactions"] == 0
+        # DD-338 Phase E.python: canonical lib treats redactions as list[str] of
+        # reason codes; the prior integer count is recoverable from
+        # matched_total - returned. Tailscale call-sites pass redactions=[].
+        assert meta["redactions"] == []
+        assert meta["matched_total"] - meta["returned"] == 0
         assert "device_id=n1" in meta["filtered_by"]
 
 
@@ -494,7 +502,8 @@ class TestTsKeysScope:
         meta = _parse_meta(text)
         assert meta["matched_total"] == 3
         assert meta["returned"] == 1
-        assert meta["redactions"] == 2
+        assert meta["redactions"] == []
+        assert meta["matched_total"] - meta["returned"] == 2
         assert "k-infra" in text
         assert "k-home" not in text
 
@@ -592,7 +601,8 @@ class TestTsAuditLogScope:
         meta = _parse_meta(text)
         assert meta["matched_total"] == 3
         assert meta["returned"] == 1  # only n1 has tag:groupthink-infra
-        assert meta["redactions"] == 2
+        assert meta["redactions"] == []
+        assert meta["matched_total"] - meta["returned"] == 2
         assert "infra-a" in text
         assert "homehub" not in text
         assert "lab" not in text
