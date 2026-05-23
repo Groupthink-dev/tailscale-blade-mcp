@@ -1,5 +1,5 @@
 name: tailscale-blade-mcp
-version: "0.1.1"
+version: "0.3.0"
 description: >
   Network monitoring and security for Tailscale tailnets.
   Device inventory, ACL policy review, DNS configuration, auth key auditing,
@@ -76,6 +76,16 @@ env:
   - name: TAILSCALE_WRITE_ENABLED
     description: "Enable write operations (device auth, tagging, keys, routes)"
     default: "false"
+
+# DD-338 A.2.dom.c — per-record domain hint patterns surfaced to the
+# Stallari assembler via the ``_meta.domain_hints`` envelope. Empty default
+# at v1: operators populate via the harness BladeConfigStore consent UI
+# (DomainConsentView) and the daemon writes the resolved patterns to
+# ``<state-root>/blade-config/tailscale-blade-mcp/config.yaml`` on consent
+# grant. The runtime reader in ``server.py`` (``_load_blade_config``)
+# resolves the same path in lockstep with the Swift writer (Convention #23).
+blade_domain_hint_patterns:
+  patterns: []
 
 requires:
   sidereal: ">=0.57"
