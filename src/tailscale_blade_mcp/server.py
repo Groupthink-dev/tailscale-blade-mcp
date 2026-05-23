@@ -15,6 +15,11 @@ from fastmcp import FastMCP
 from pydantic import Field
 
 from tailscale_blade_mcp.client import TailscaleClient, TailscaleError
+from tailscale_blade_mcp.domain_hint import (
+    Pattern,
+    compute_domain_hint,
+    load_patterns_from_yaml,
+)
 from tailscale_blade_mcp.formatters import (
     append_meta_envelope,
     format_acl,
@@ -111,6 +116,151 @@ def _build_filtered_by(
     return parts
 
 
+# ---------------------------------------------------------------------------
+# DD-338 A.2.dom.c — BladeConfigStore reader + Tailscale field projector
+# ---------------------------------------------------------------------------
+
+_BLADE_ID = "tailscale-blade-mcp"
+
+
+def _state_root() -> str:
+    """Resolve Stallari state root.
+
+    Honours ``STALLARI_STATE_ROOT`` env var (used in tests + non-standard
+    deployments); falls back to the macOS Application Support default per
+    Convention #27 / StallariPaths.
+    """
+    override = os.environ.get("STALLARI_STATE_ROOT")
+    if override:
+        return override
+    return os.path.expanduser("~/Library/Application Support/Stallari")
+
+
+def _sanitize_blade_id(blade_id: str) -> str:
+    """Mirror the Swift writer's blade-id directory naming.
+
+    Lower-case + ``/`` ⇒ ``_`` — kept in lockstep with BladeConfigStore.swift
+    (Convention #23: reader and writer agree on the on-disk shape).
+    """
+    return blade_id.lower().replace("/", "_")
+
+
+def _load_blade_config(blade_id: str) -> list[Pattern]:
+    """Read this blade's domain_hint patterns from the BladeConfigStore.
+
+    Convention #22 graceful degradation: missing / unreadable / malformed
+    config returns ``[]`` — the blade still runs, simply without per-record
+    ``domain_hints`` emission.
+
+    Convention #23 reader-side compliance: resolves via state-root +
+    ``blade-config/<sanitized-blade>/config.yaml`` in lockstep with the
+    Swift writer's path layout.
+    """
+    config_path = os.path.join(
+        _state_root(),
+        "blade-config",
+        _sanitize_blade_id(blade_id),
+        "config.yaml",
+    )
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            yaml_str = f.read()
+    except OSError:
+        return []
+    return load_patterns_from_yaml(yaml_str)
+
+
+# Cached at module load; re-launch the blade to pick up config edits at v1.
+_PATTERNS: list[Pattern] = _load_blade_config(_BLADE_ID)
+
+
+def _tailscale_field_projector(record: dict[str, Any], field: str) -> Any:
+    """Project a Tailscale record onto a logical ``Pattern.field`` name.
+
+    Tailscale Devices API record shape (subset)::
+
+        {
+          "id": "12345",
+          "nodeId": "n...",
+          "name": "host.tailnet.ts.net",
+          "hostname": "host",
+          "addresses": ["100.x.y.z"],
+          "user": "user@example.com",
+          "tags": ["tag:server", "tag:prod"],
+          "os": "linux",
+          ...
+        }
+
+    Supported field names (case-insensitive): ``hostname``, ``name``,
+    ``tags`` (list), ``user``, ``addresses`` (list), ``os``. Auth-key
+    records expose top-level ``tags`` (post-flatten); user records expose
+    ``loginName`` mapped from ``user`` and ``displayName`` as scalar; audit
+    entries expose ``actor`` / ``target.id`` shapes (best-effort projector
+    falls back to ``None`` for unknown field names so dispatch silently
+    skips the rule instead of crashing).
+    """
+    if not isinstance(record, dict):
+        return None
+    f = field.lower()
+    if f == "hostname":
+        return record.get("hostname")
+    if f == "name":
+        return record.get("name")
+    if f == "tags":
+        v = record.get("tags")
+        return v if isinstance(v, list) else None
+    if f == "user":
+        # Device records: ``user`` is a login email string.
+        # User records: ``loginName`` is the analogous field.
+        return record.get("user") or record.get("loginName")
+    if f == "addresses":
+        v = record.get("addresses")
+        return v if isinstance(v, list) else None
+    if f == "os":
+        return record.get("os")
+    if f == "id":
+        return record.get("nodeId") or record.get("id")
+    return None
+
+
+def _record_id(rec: dict[str, Any]) -> str | None:
+    """Resolve the stable record ID for the ``domain_hints`` map key.
+
+    Tailscale device records preferentially use ``nodeId`` (newer, stable);
+    falls back to legacy ``id`` (auth-key records, user records, audit
+    entries). Returns ``None`` for records without either — caller omits
+    them from the hints map.
+    """
+    if not isinstance(rec, dict):
+        return None
+    for key in ("nodeId", "id"):
+        v = rec.get(key)
+        if isinstance(v, str) and v:
+            return v
+        if isinstance(v, int):
+            return str(v)
+    return None
+
+
+def _compute_domain_hints_for_records(records: list[dict[str, Any]]) -> dict[str, str]:
+    """Apply ``_PATTERNS`` to each record; return ``{record_id: domain}`` map.
+
+    Records lacking a domain match are omitted. Empty pattern list ⇒ empty
+    dict ⇒ caller suppresses the ``domain_hints`` envelope key.
+    """
+    if not _PATTERNS:
+        return {}
+    out: dict[str, str] = {}
+    for rec in records:
+        rid = _record_id(rec)
+        if rid is None:
+            continue
+        hint = compute_domain_hint(rec, _PATTERNS, _tailscale_field_projector)
+        if hint is not None:
+            out[rid] = hint
+    return out
+
+
 # ===========================================================================
 # INFO
 # ===========================================================================
@@ -166,13 +316,16 @@ async def ts_devices(
         redactions = matched_total - returned
         payload = format_device_list(filtered)
         latency_ms = int((time.monotonic() - started) * 1000)
-        meta = {
+        meta: dict[str, Any] = {
             "matched_total": matched_total,
             "returned": returned,
             "filtered_by": _build_filtered_by(scope, scope_tag_list),
             "redactions": redactions,
             "latency_ms": latency_ms,
         }
+        domain_hints = _compute_domain_hints_for_records(filtered)
+        if domain_hints:
+            meta["domain_hints"] = domain_hints
         return append_meta_envelope(payload, meta)
     except TailscaleError as e:
         return _error_response(e)
@@ -322,13 +475,16 @@ async def ts_keys(
         redactions = matched_total - returned
         payload = format_key_list(filtered)
         latency_ms = int((time.monotonic() - started) * 1000)
-        meta = {
+        meta: dict[str, Any] = {
             "matched_total": matched_total,
             "returned": returned,
             "filtered_by": _build_filtered_by(scope, scope_tag_list),
             "redactions": redactions,
             "latency_ms": latency_ms,
         }
+        domain_hints = _compute_domain_hints_for_records(filtered)
+        if domain_hints:
+            meta["domain_hints"] = domain_hints
         return append_meta_envelope(payload, meta)
     except TailscaleError as e:
         return _error_response(e)
