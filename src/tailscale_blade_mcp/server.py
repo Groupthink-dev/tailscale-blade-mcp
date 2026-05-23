@@ -310,6 +310,9 @@ async def ts_devices(
         return f"Error: {ve}"
     try:
         devices = await _get_client().get_devices()
+        # DD-338 B.1.b: canonical sort-before-return on nodeId asc (legacy `id` tie-break).
+        # Sort BEFORE apply_scope_filter so post-filter output is order-preserving.
+        devices = sorted(devices, key=lambda d: (d.get("nodeId", "") or "", d.get("id", "") or ""))
         matched_total = len(devices)
         filtered, scope_tag_list = apply_scope_filter(devices, scope)
         returned = len(filtered)
@@ -469,6 +472,10 @@ async def ts_keys(
     try:
         raw_keys = await _get_client().get_keys()
         keys_with_top_tags = _flatten_key_tags(raw_keys)
+        # DD-338 B.1.b: canonical sort-before-return on key id asc.
+        # Sort AFTER _flatten_key_tags (sees the hoisted-tag-clone shape) and
+        # BEFORE apply_scope_filter (so post-filter output is order-preserving).
+        keys_with_top_tags = sorted(keys_with_top_tags, key=lambda k: k.get("id", "") or "")
         matched_total = len(keys_with_top_tags)
         filtered, scope_tag_list = apply_scope_filter(keys_with_top_tags, scope)
         returned = len(filtered)
@@ -497,9 +504,21 @@ async def ts_keys(
 
 @mcp.tool()
 async def ts_users() -> str:
-    """List users: name, login, role, status, device count, online/last seen."""
+    """List users: name, login, role, status, device count, online/last seen.
+    Sorted by case-folded loginName ascending (numeric id tie-break)."""
     try:
         users = await _get_client().get_users()
+        # DD-338 B.1.b: canonical sort-before-return on case-folded loginName
+        # with numeric id tie-break. loginName is the stable user-mental-model
+        # handle (email-shaped, unique within a tailnet); numeric id is opaque
+        # to formatter output but provides deterministic tie-break.
+        users = sorted(
+            users,
+            key=lambda u: (
+                (u.get("loginName", "") or "").casefold(),
+                str(u.get("id", "") or ""),
+            ),
+        )
         return format_user_list(users)
     except TailscaleError as e:
         return _error_response(e)
@@ -512,9 +531,12 @@ async def ts_users() -> str:
 
 @mcp.tool()
 async def ts_webhooks() -> str:
-    """List configured webhooks: endpoint URL, event subscriptions, created date."""
+    """List configured webhooks: endpoint URL, event subscriptions, created date.
+    Sorted by endpointId ascending."""
     try:
         webhooks = await _get_client().get_webhooks()
+        # DD-338 B.1.b: canonical sort-before-return on endpointId ascending.
+        webhooks = sorted(webhooks, key=lambda w: w.get("endpointId", "") or "")
         return format_webhook_list(webhooks)
     except TailscaleError as e:
         return _error_response(e)
