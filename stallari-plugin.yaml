@@ -84,8 +84,7 @@ env:
 # ``<state-root>/blade-config/tailscale-blade-mcp/config.yaml`` on consent
 # grant. The runtime reader in ``server.py`` (``_load_blade_config``)
 # resolves the same path in lockstep with the Swift writer (Convention #23).
-blade_domain_hint_patterns:
-  patterns: []
+blade_domain_hint_patterns: []
 
 requires:
   sidereal: ">=0.57"
