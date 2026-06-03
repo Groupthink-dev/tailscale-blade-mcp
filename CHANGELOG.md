@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-axis version scheme parallel to the rest of the
 Stallari platform (`major.macro.minor.patch`).
 
+## [0.7.0] - 2026-06-03
+
+### Added
+- **`ts_acl_set` — ACL apply tool** (P7 7a). Pushes a reviewed full ACL policy
+  to the tailnet via `POST /acl`. Write-gated (`TAILSCALE_WRITE_ENABLED=true`).
+  Always validates the policy first and refuses to apply on validation failure.
+  Optimistic concurrency by default: auto-fetches the current ETag and sends it
+  as `If-Match`, so a concurrent admin edit returns a clear "ACL changed since
+  you read it — re-fetch" message (HTTP 412) instead of clobbering. Bypass with
+  `allow_overwrite_concurrent=true`. On success returns an applied summary (new
+  ETag; rule / tagOwner / test counts) plus the DD-338 `_meta` envelope
+  (`audit_surface: structured`).
+- `client.set_acl(policy, *, if_match=None) -> (applied_policy, new_etag)` and
+  `client.get_acl_with_etag() -> (policy, etag)` — header-aware ACL methods that
+  surface and consume the policy-file ETag for optimistic concurrency.
+- `PreconditionFailedError` (412) and `PolicyError` (400) client exception types
+  for actionable ACL-apply error mapping; 403 carries a policy-file-write-scope note.
+
+### Changed
+- `client._request` refactored into `_raw_request` (transport + scrubbing, no
+  status raising) + `_check_status` so header/status-aware callers can reuse the
+  shared error handling. Behaviour of all existing methods is unchanged.
+- Version bumped to 0.7.0; `__init__.__version__` re-synced to the package
+  version (had drifted to 0.2.0).
+- Docs (README + CLAUDE.md) updated: tool count 17 → 19 (the prior "17" was
+  already stale — 18 tools shipped before this change), ACL-apply scope
+  requirement, optimistic-concurrency behaviour, and `POST /acl` API reference.
+
 ## [0.6.0] - 2026-05-24
 
 ### Changed

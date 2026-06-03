@@ -484,6 +484,96 @@ async def ts_acl_validate(
         return _error_response(e)
 
 
+@mcp.tool()
+async def ts_acl_set(
+    policy_json: Annotated[
+        str,
+        Field(description="Full ACL policy as a JSON string. Replaces the ENTIRE policy file (not a patch)."),
+    ],
+    if_match: Annotated[
+        str | None,
+        Field(
+            description=(
+                "ETag from a prior read for optimistic concurrency. If omitted, the "
+                "current ETag is fetched automatically and used as the guard. Ignored "
+                "when allow_overwrite_concurrent=true."
+            ),
+        ),
+    ] = None,
+    allow_overwrite_concurrent: Annotated[
+        bool,
+        Field(
+            description=(
+                "Skip the If-Match optimistic-concurrency guard and overwrite even if "
+                "the ACL changed since it was read. Dangerous — defaults to false."
+            ),
+        ),
+    ] = False,
+) -> str:
+    """Apply (POST) a full ACL policy to the tailnet. Requires TAILSCALE_WRITE_ENABLED=true.
+
+    Always validates the policy first and refuses to apply on validation failure.
+    By default uses optimistic concurrency: the current ETag is sent as ``If-Match``
+    so a concurrent admin edit fails with a clear re-fetch message instead of
+    silently clobbering. Pass ``allow_overwrite_concurrent=true`` to bypass the
+    guard. Requires a token with ACL policy-file WRITE scope (a read-only key 403s).
+    Emits a DD-338 ``_meta`` envelope (``audit_surface: structured``).
+    """
+    import json
+
+    started = time.monotonic()
+    gate = require_write()
+    if gate:
+        return gate
+    try:
+        policy = json.loads(policy_json)
+    except json.JSONDecodeError as e:
+        return f"Error: Invalid JSON: {e}"
+
+    client = _get_client()
+    try:
+        # ALWAYS validate before applying — refuse without POSTing on failure.
+        validation = await client.validate_acl(policy)
+        validation_msg = validation.get("message", "")
+        if validation_msg:
+            return f"Refused: ACL validation failed — {validation_msg}\n(policy NOT applied)"
+
+        # Optimistic concurrency: fetch the current ETag unless explicitly overriding.
+        effective_if_match = if_match
+        if allow_overwrite_concurrent:
+            effective_if_match = None
+        elif effective_if_match is None:
+            _current, effective_if_match = await client.get_acl_with_etag()
+
+        applied, new_etag = await client.set_acl(policy, if_match=effective_if_match)
+
+        summary_src = applied or policy
+        rule_count = len(summary_src.get("acls", []) or summary_src.get("ACLs", []) or [])
+        tagowner_count = len(summary_src.get("tagOwners", {}) or {})
+        test_count = len(summary_src.get("tests", []) or [])
+
+        lines = [
+            "Applied ACL policy.",
+            f"New ETag: {new_etag or '(none returned)'}",
+            f"Rules: {rule_count} | tagOwners: {tagowner_count} | tests: {test_count}",
+        ]
+        if allow_overwrite_concurrent:
+            lines.append("(applied WITHOUT If-Match concurrency guard)")
+        payload = "\n".join(lines)
+
+        latency_ms = int((time.monotonic() - started) * 1000)
+        guard = "off" if allow_overwrite_concurrent else "if-match"
+        envelope = meta_envelope(
+            matched_total=1,
+            returned=1,
+            latency_ms=latency_ms,
+            filtered_by=_build_filtered_by(None, [], {"concurrency_guard": guard}),
+        )
+        return append_meta(payload, envelope)
+    except TailscaleError as e:
+        return _error_response(e)
+
+
 # ===========================================================================
 # KEYS
 # ===========================================================================

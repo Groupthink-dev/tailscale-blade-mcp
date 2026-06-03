@@ -1,12 +1,12 @@
 # tailscale-blade-mcp
 
-Tailscale network monitoring and security MCP. 17 tools, token-efficient output.
+Tailscale network monitoring and security MCP. 19 tools, token-efficient output.
 
 ## Architecture
 
 ```
 src/tailscale_blade_mcp/
-├── server.py       — FastMCP server, 17 @mcp.tool decorators
+├── server.py       — FastMCP server, 19 @mcp.tool decorators
 ├── client.py       — TailscaleClient wrapping httpx async, credential scrubbing
 ├── formatters.py   — Token-efficient output (pipe-delimited, null omission, relative times)
 ├── models.py       — TailscaleConfig, write gate
@@ -28,6 +28,7 @@ make run            # Start MCP server (stdio)
 - **Tailnet `-` shorthand** — auto-detects from API key, no explicit tailnet config needed
 - **`nodeId` preferred** — newer device identifier format (not legacy `id`)
 - **Write gate** — `TAILSCALE_WRITE_ENABLED=true` required for mutations, destructive ops also need `confirm=true`
+- **ACL apply** — `ts_acl_set` validates first, then POSTs with optimistic concurrency: it auto-fetches the current ETag and sends `If-Match` so a concurrent admin edit 412s instead of clobbering (bypass via `allow_overwrite_concurrent=true`). `client.get_acl_with_etag()` surfaces the ETag; `client.set_acl(policy, if_match=...)` returns `(applied_policy, new_etag)`. Apply needs a token with **policy-file write scope** (read-only keys 403).
 - **Credential scrubbing** — 4 regex patterns strip API keys, Bearer tokens from errors
 - **No pagination** — Tailscale API returns all results in one response
 
@@ -38,6 +39,9 @@ make run            # Start MCP server (stdio)
 - Tailnet path: `/tailnet/{tailnet}/...` (use `-` for auto-detect)
 - Devices: `/tailnet/-/devices?fields=all`
 - Device detail: `/device/{nodeId}?fields=all`
+- ACL read: `GET /tailnet/-/acl` (response carries `ETag`)
+- ACL validate: `POST /tailnet/-/acl/validate`
+- ACL apply: `POST /tailnet/-/acl` (`Content-Type: application/json`, optional `If-Match: <etag>`; needs policy-file write scope)
 
 ## Testing
 
