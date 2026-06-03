@@ -26,14 +26,27 @@ Tailscale exposes a clean REST API (v2) for managing devices, ACL policies, DNS,
 
 ## Quick start
 
-```bash
-# Install
-uv pip install -e .
+Published on PyPI — run it without a checkout via [`uvx`](https://docs.astral.sh/uv/):
 
+```bash
 # Configure
 export TAILSCALE_API_KEY="tskey-api-..."
 
-# Run
+# Run the latest published release (no install step)
+uvx tailscale-blade-mcp
+```
+
+Or install it as a tool / into an environment:
+
+```bash
+uv tool install tailscale-blade-mcp     # or: pip install tailscale-blade-mcp
+tailscale-blade-mcp
+```
+
+From a local checkout (development):
+
+```bash
+uv pip install -e .
 tailscale-blade-mcp
 ```
 
@@ -124,6 +137,26 @@ Both are passed via `TAILSCALE_API_KEY`. For OAuth, obtain a Bearer token first 
 | **Tailnet auto-detect** | Uses `-` shorthand by default — no tailnet name in config |
 
 ## Sidereal integration
+
+From the published package (recommended — pin a version with `tailscale-blade-mcp@0.7.0`):
+
+```json
+{
+  "mcpServers": {
+    "tailscale": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["tailscale-blade-mcp"],
+      "env": {
+        "TAILSCALE_API_KEY": "tskey-api-...",
+        "TAILSCALE_WRITE_ENABLED": "false"
+      }
+    }
+  }
+}
+```
+
+From a local checkout (development):
 
 ```json
 {
