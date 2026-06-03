@@ -159,9 +159,7 @@ class TestMetaEnvelope:
         parsed = json.loads(rendered[len("_meta: ") :])
         assert parsed["matched_total"] == 14
         # Canonical builder alphabetically sorts filtered_by.
-        assert parsed["filtered_by"] == sorted(
-            ["scope=infrastructure", "tags=tag:groupthink-infra"]
-        )
+        assert parsed["filtered_by"] == sorted(["scope=infrastructure", "tags=tag:groupthink-infra"])
 
     def test_append_envelope_uses_double_newline(self) -> None:
         envelope = meta_envelope(matched_total=1, returned=1, latency_ms=5, filtered_by=[])
