@@ -41,6 +41,14 @@ class RateLimitError(TailscaleError):
     """Rate limit exceeded."""
 
 
+class PreconditionFailedError(TailscaleError):
+    """Optimistic-concurrency precondition failed (HTTP 412 — ETag mismatch)."""
+
+
+class PolicyError(TailscaleError):
+    """Policy rejected by the API (HTTP 400 — ACL syntax/semantic error)."""
+
+
 def _scrub(message: str) -> str:
     """Remove credentials from error messages."""
     for pattern in _CREDENTIAL_PATTERNS:
@@ -86,14 +94,21 @@ class TailscaleClient:
             await self._http.aclose()
             self._http = None
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        """Make an API request with error handling and credential scrubbing."""
+    async def _raw_request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """Issue a request with transport-error scrubbing but no HTTP-status raising.
+
+        Returns the raw ``httpx.Response`` so callers that need response headers
+        (e.g. the ACL ``ETag`` for optimistic concurrency) or bespoke status
+        mapping (e.g. ``set_acl``'s 412 handling) can inspect it directly.
+        """
         http = self._get_http()
         try:
-            resp = await http.request(method, path, **kwargs)
+            return await http.request(method, path, **kwargs)
         except httpx.HTTPError as e:
             raise TailscaleError(_scrub(f"Request failed: {e}")) from e
 
+    def _check_status(self, resp: httpx.Response, method: str, path: str) -> None:
+        """Raise the appropriate typed error for a non-2xx response."""
         if resp.status_code == 401:
             raise AuthError("Authentication failed. Check your TAILSCALE_API_KEY.")
         if resp.status_code == 403:
@@ -106,6 +121,10 @@ class TailscaleClient:
             body = resp.text
             raise TailscaleError(_scrub(f"API error {resp.status_code}: {body}"))
 
+    async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        """Make an API request with error handling and credential scrubbing."""
+        resp = await self._raw_request(method, path, **kwargs)
+        self._check_status(resp, method, path)
         if resp.status_code == 204:
             return None
         return resp.json()
@@ -184,15 +203,72 @@ class TailscaleClient:
     # ACL / Policy
     # ------------------------------------------------------------------
 
+    async def get_acl_with_etag(self) -> tuple[dict[str, Any], str | None]:
+        """Get the ACL policy file plus its current ``ETag``.
+
+        The ETag is the optimistic-concurrency token: pass it as ``If-Match`` to
+        :meth:`set_acl` so a concurrent admin edit produces a 412 instead of a
+        silent overwrite. Returns ``(policy, etag)``; ``etag`` is ``None`` if the
+        API response omitted the header.
+        """
+        path = self._tailnet_path("acl")
+        resp = await self._raw_request("GET", path)
+        self._check_status(resp, "GET", path)
+        data: dict[str, Any] = resp.json()
+        etag = resp.headers.get("ETag") or resp.headers.get("etag")
+        return data, etag
+
     async def get_acl(self) -> dict[str, Any]:
         """Get the ACL policy file."""
-        data: dict[str, Any] = await self._request("GET", self._tailnet_path("acl"))
+        data, _etag = await self.get_acl_with_etag()
         return data
 
     async def validate_acl(self, policy: dict[str, Any]) -> dict[str, Any]:
         """Validate an ACL policy file."""
         data: dict[str, Any] = await self._request("POST", self._tailnet_path("acl/validate"), json=policy)
         return data
+
+    async def set_acl(
+        self, policy: dict[str, Any], *, if_match: str | None = None
+    ) -> tuple[dict[str, Any], str | None]:
+        """Apply (POST) a full ACL policy file. Returns ``(applied_policy, new_etag)``.
+
+        Requires an API token/OAuth client carrying ACL *write* scope (policy
+        file write) — read-only tokens get a 403. When ``if_match`` is supplied
+        it is sent as the ``If-Match`` header for optimistic concurrency; a
+        concurrent edit then yields a 412 (:class:`PreconditionFailedError`).
+        Status mapping is bespoke (not via ``_check_status``) so 412/400 carry
+        actionable messages; all error bodies are credential-scrubbed.
+        """
+        path = self._tailnet_path("acl")
+        headers = {"Content-Type": "application/json"}
+        if if_match is not None:
+            headers["If-Match"] = if_match
+        resp = await self._raw_request("POST", path, json=policy, headers=headers)
+
+        if resp.status_code == 401:
+            raise AuthError("Authentication failed. Check your TAILSCALE_API_KEY.")
+        if resp.status_code == 403:
+            raise AuthError(
+                "Forbidden: applying an ACL needs a token with policy-file WRITE scope. "
+                "A read-only API key cannot POST /acl — use an OAuth client with the "
+                "'acl' scope or an access token from an account that can edit the policy file."
+            )
+        if resp.status_code == 412:
+            raise PreconditionFailedError(
+                "ACL changed since you read it (ETag mismatch, HTTP 412). "
+                "Re-fetch the current policy with ts_acl, re-apply your edits, then retry."
+            )
+        if resp.status_code == 400:
+            raise PolicyError(_scrub(f"ACL rejected (HTTP 400 — syntax/semantic error): {resp.text}"))
+        if resp.status_code == 429:
+            raise RateLimitError("Rate limit exceeded. Try again later.")
+        if resp.status_code >= 400:
+            raise TailscaleError(_scrub(f"API error {resp.status_code}: {resp.text}"))
+
+        applied: dict[str, Any] = resp.json() if resp.content else {}
+        new_etag = resp.headers.get("ETag") or resp.headers.get("etag")
+        return applied, new_etag
 
     # ------------------------------------------------------------------
     # Keys

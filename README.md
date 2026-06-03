@@ -6,16 +6,16 @@ An MCP server that gives AI agents structured access to Tailscale tailnets. Buil
 
 Tailscale exposes a clean REST API (v2) for managing devices, ACL policies, DNS, auth keys, users, and audit logs. This MCP wraps it with the guardrails that automated agents need:
 
-- **Security-first tool set** — 17 tools focused on what network security agents actually need: device inventory, key expiry auditing, ACL review, route approval, DNS hygiene. Not a thin wrapper around every endpoint.
+- **Security-first tool set** — 19 tools focused on what network security agents actually need: device inventory, key expiry auditing, ACL review + apply, route approval, DNS hygiene. Not a thin wrapper around every endpoint.
 - **Token-efficient output** — compact pipe-delimited format. A 20-device tailnet in ~40 tokens per device. Devices flagged with `KEY_EXPIRY_OFF`, `KEY_EXPIRED`, `UPDATE_AVAILABLE`, `UNAUTHORIZED`, `OFFLINE` at a glance.
-- **Write-gated mutations** — device authorization, tagging, key management, and route approval require explicit opt-in via `TAILSCALE_WRITE_ENABLED=true`. Destructive operations (delete device, revoke key) additionally require per-call `confirm=true`.
+- **Write-gated mutations** — device authorization, tagging, key management, route approval, and ACL apply require explicit opt-in via `TAILSCALE_WRITE_ENABLED=true`. Destructive operations (delete device, revoke key) additionally require per-call `confirm=true`; ACL apply defaults to optimistic-concurrency (`If-Match`) so it won't silently clobber a concurrent edit.
 - **SecOps visibility** — ACL policy summary shows groups, rules, SSH rules, and tag owners. Audit log shows who changed what. Key listing flags reusable keys and expiry status.
 
 ## How this differs from other Tailscale MCPs
 
 | | tailscale-blade-mcp | HexSleeves/tailscale-mcp | jaxxstorm/tailscale-mcp |
 |---|---|---|---|
-| **Focus** | Monitoring + security (17 tools) | Management (~15 tools) | Read-only (~5 tools) |
+| **Focus** | Monitoring + security (19 tools) | Management (~15 tools) | Read-only (~5 tools) |
 | **Design for** | LLM agents (token-efficient) | Claude Code | General MCP |
 | **Output** | Pipe-delimited, compact | Full JSON | Full JSON |
 | **Write safety** | Dual-gated (env + confirm) | Direct writes | Read-only |
@@ -37,7 +37,7 @@ export TAILSCALE_API_KEY="tskey-api-..."
 tailscale-blade-mcp
 ```
 
-## 17 tools, 5 categories
+## 19 tools, 5 categories
 
 ### Info (1 tool)
 
@@ -53,13 +53,14 @@ tailscale-blade-mcp
 | `ts_device` | Full detail — addresses, client version, key status, tags, user | ~120 |
 | `ts_device_routes` | Routes — advertised subnets, approved/unapproved status | ~30/route |
 
-### Network (3 tools)
+### Network (4 tools)
 
 | Tool | Purpose | Token cost |
 |------|---------|------------|
 | `ts_dns` | DNS — nameservers, MagicDNS, search paths, split DNS | ~50 |
 | `ts_acl` | ACL policy — groups, rules, SSH rules, tag owners | ~30/rule |
-| `ts_acl_validate` | Validate a policy without applying it | ~20 |
+| `ts_acl_validate` | Validate a policy without applying it (write-gated) | ~20 |
+| `ts_acl_set` | Apply a full ACL policy — validates first, optimistic-concurrency `If-Match` guard (write-gated; needs policy-file write scope) | ~30 |
 
 ### Users & Keys (3 tools)
 
@@ -75,7 +76,9 @@ tailscale-blade-mcp
 |------|---------|------------|
 | `ts_audit_log` | Configuration changes — who, what, when | ~25/entry |
 
-### Write Operations (6 tools, gated)
+### Write Operations (7 tools, gated)
+
+> ACL apply (`ts_acl_set`) is also write-gated; it's listed under **Network** with the other ACL tools.
 
 | Tool | Gate | Purpose |
 |------|------|---------|
@@ -106,12 +109,16 @@ Tailscale supports two auth methods:
 
 Both are passed via `TAILSCALE_API_KEY`. For OAuth, obtain a Bearer token first and pass that.
 
+**ACL write scope.** Read tools work with any valid token. Applying an ACL (`ts_acl_set`) additionally requires the token to carry **policy-file write** scope — an OAuth client with the `acl` scope, or an API access token from an account that can edit the tailnet policy file. A read-only token will validate fine but return a `403` on apply, with a message pointing at the scope requirement.
+
 ## Security model
 
 | Layer | Mechanism |
 |-------|-----------|
 | **Write gate** | `TAILSCALE_WRITE_ENABLED=true` required for any mutation |
 | **Destructive confirm** | `ts_delete_key` and `ts_delete_device` require `confirm=true` |
+| **ACL validate-before-apply** | `ts_acl_set` always validates the policy and refuses to apply on failure |
+| **ACL optimistic concurrency** | `ts_acl_set` sends `If-Match` (the current ETag) by default; a concurrent edit fails with a re-fetch message rather than clobbering. Bypass only via `allow_overwrite_concurrent=true` |
 | **Credential scrubbing** | API keys, Bearer tokens, Authorization headers stripped from errors |
 | **Bearer auth** | Optional `TAILSCALE_MCP_API_TOKEN` for HTTP transport |
 | **Tailnet auto-detect** | Uses `-` shorthand by default — no tailnet name in config |
@@ -155,7 +162,7 @@ make run            # Start MCP server (stdio)
 
 ```
 src/tailscale_blade_mcp/
-├── server.py       — FastMCP server, 17 @mcp.tool decorators
+├── server.py       — FastMCP server, 19 @mcp.tool decorators
 ├── client.py       — TailscaleClient wrapping httpx async, credential scrubbing
 ├── formatters.py   — Token-efficient output (pipe-delimited, null omission, human units)
 ├── models.py       — TailscaleConfig, write gate, constants
