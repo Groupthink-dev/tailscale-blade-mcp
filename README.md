@@ -22,7 +22,7 @@ Tailscale exposes a clean REST API (v2) for managing devices, ACL policies, DNS,
 | **Audit log** | Yes | No | No |
 | **ACL summary** | Parsed groups/rules/SSH/tags | Raw JSON | Raw JSON |
 | **Key hygiene** | Flags reusable, expiry status | Basic listing | No |
-| **Marketplace** | Sidereal certified | Standalone | Standalone |
+| **Marketplace** | Stallari certified | Standalone | Standalone |
 
 ## Quick start
 
@@ -136,7 +136,7 @@ Both are passed via `TAILSCALE_API_KEY`. For OAuth, obtain a Bearer token first 
 | **Bearer auth** | Optional `TAILSCALE_MCP_API_TOKEN` for HTTP transport |
 | **Tailnet auto-detect** | Uses `-` shorthand by default — no tailnet name in config |
 
-## Sidereal integration
+## Stallari integration
 
 From the published package (recommended — pin a version with `tailscale-blade-mcp@0.7.0`):
 
