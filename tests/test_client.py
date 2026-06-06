@@ -120,3 +120,67 @@ class TestAclSetClient:
         assert "tskey-api-leak" not in msg
         assert "REDACTED" in msg
         await client.close()
+
+
+AUDIT_RE = r".*/tailnet/-/logging/configuration.*"
+WEBHOOKS_URL = "https://api.tailscale.com/api/v2/tailnet/-/webhooks"
+
+
+class TestAuditLogClient:
+    """DD-385 Phase 1 regressions — the live logging endpoint demands a
+    ``start``+``end`` window, not the ``count`` the blade used to send."""
+
+    @pytest.fixture
+    def anyio_backend(self) -> str:
+        return "asyncio"
+
+    @respx.mock
+    async def test_get_audit_log_sends_start_end_not_count(self, mock_env: None) -> None:
+        route = respx.get(url__regex=AUDIT_RE).mock(return_value=Response(200, json={"logs": []}))
+        client = TailscaleClient()
+        await client.get_audit_log(count=50, days=7)
+        query = route.calls.last.request.url.params
+        # The pre-fix bug: ``?count=`` → live API 400s. Required: start AND end.
+        assert "start" in query
+        assert "end" in query
+        assert "count" not in query
+        await client.close()
+
+    @respx.mock
+    async def test_get_audit_log_sorts_desc_and_truncates(self, mock_env: None) -> None:
+        logs = [
+            {"eventTime": "2026-06-01T00:00:00Z", "type": "CONFIG", "action": "A"},
+            {"eventTime": "2026-06-03T00:00:00Z", "type": "CONFIG", "action": "C"},
+            {"eventTime": "2026-06-02T00:00:00Z", "type": "CONFIG", "action": "B"},
+        ]
+        respx.get(url__regex=AUDIT_RE).mock(return_value=Response(200, json={"logs": logs}))
+        client = TailscaleClient()
+        result = await client.get_audit_log(count=2)
+        assert [e["action"] for e in result] == ["C", "B"]  # most-recent-first, truncated
+        await client.close()
+
+    @respx.mock
+    async def test_get_audit_log_handles_null_logs(self, mock_env: None) -> None:
+        respx.get(url__regex=AUDIT_RE).mock(return_value=Response(200, json={"logs": None}))
+        client = TailscaleClient()
+        assert await client.get_audit_log() == []
+        await client.close()
+
+
+class TestWebhooksClient:
+    """DD-385 Phase 1 regression — live API emits ``{"webhooks": null}`` for an
+    empty tailnet; the ``-> list`` contract must hold (a bare null crashed the
+    ``sorted()`` in ts_webhooks)."""
+
+    @pytest.fixture
+    def anyio_backend(self) -> str:
+        return "asyncio"
+
+    @respx.mock
+    async def test_get_webhooks_null_collapses_to_empty_list(self, mock_env: None) -> None:
+        respx.get(WEBHOOKS_URL).mock(return_value=Response(200, json={"webhooks": None}))
+        client = TailscaleClient()
+        result = await client.get_webhooks()
+        assert result == []
+        assert isinstance(result, list)
+        await client.close()

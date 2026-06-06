@@ -520,8 +520,8 @@ class TestTsAuditLogScope:
     ) -> None:
         from tailscale_blade_mcp.server import ts_audit_log
 
-        # NB: matches the actual URL with ?count=50 query string.
-        respx.get("https://api.tailscale.com/api/v2/tailnet/-/logging/configuration?count=50").mock(
+        # NB: query-agnostic match — the tool now sends ?start=&end= (DD-385 Phase 1).
+        respx.get(url__regex=r".*/tailnet/-/logging/configuration.*").mock(
             return_value=Response(
                 200,
                 json={
@@ -552,7 +552,7 @@ class TestTsAuditLogScope:
     ) -> None:
         from tailscale_blade_mcp.server import ts_audit_log
 
-        respx.get("https://api.tailscale.com/api/v2/tailnet/-/logging/configuration?count=50").mock(
+        respx.get(url__regex=r".*/tailnet/-/logging/configuration.*").mock(
             return_value=Response(
                 200,
                 json={

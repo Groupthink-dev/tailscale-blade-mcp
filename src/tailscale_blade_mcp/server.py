@@ -696,7 +696,11 @@ async def ts_webhooks() -> str:
 
 @mcp.tool()
 async def ts_audit_log(
-    count: Annotated[int, Field(description="Number of entries to return (default 50)", ge=1, le=200)] = 50,
+    count: Annotated[int, Field(description="Max entries returned, most-recent-first (default 50)", ge=1, le=200)] = 50,
+    days: Annotated[
+        int,
+        Field(description="Lookback window in days (default 7); wider windows risk the 30s API timeout", ge=1, le=90),
+    ] = 7,
     scope: Annotated[
         str | None,
         Field(
@@ -722,7 +726,7 @@ async def ts_audit_log(
     except ValueError as ve:
         return f"Error: {ve}"
     try:
-        entries = await _get_client().get_audit_log(count)
+        entries = await _get_client().get_audit_log(count, days=days)
         matched_total = len(entries)
 
         if scope is None:
@@ -732,7 +736,7 @@ async def ts_audit_log(
                 matched_total=matched_total,
                 returned=matched_total,
                 latency_ms=latency_ms,
-                filtered_by=_build_filtered_by(None, [], {"count": count}),
+                filtered_by=_build_filtered_by(None, [], {"count": count, "days": days}),
             )
             return append_meta(payload, envelope)
 
@@ -774,7 +778,7 @@ async def ts_audit_log(
             matched_total=matched_total,
             returned=returned,
             latency_ms=latency_ms,
-            filtered_by=_build_filtered_by(scope, sorted(scope_tags), {"count": count}),
+            filtered_by=_build_filtered_by(scope, sorted(scope_tags), {"count": count, "days": days}),
         )
         return append_meta(payload, envelope)
     except TailscaleError as e:

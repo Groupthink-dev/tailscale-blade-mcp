@@ -562,8 +562,13 @@ def format_audit_line(entry: dict[str, Any]) -> str:
     actor_name = actor.get("displayName", "") or actor.get("loginName", "") or actor.get("id", "?")
     parts.append(actor_name)
 
-    action = entry.get("type", "?")
-    parts.append(action)
+    # Live entries carry both ``type`` (category, e.g. CONFIG) and ``action``
+    # (the verb, e.g. CREATE/UPDATE/DELETE). Surface the verb — joined to the
+    # category when both are present — rather than the less-useful category alone.
+    etype = entry.get("type", "")
+    eaction = entry.get("action", "")
+    label = ".".join(p for p in (etype, eaction) if p) or "?"
+    parts.append(label)
 
     target = entry.get("target", {})
     target_name = target.get("name", "") or target.get("id", "")

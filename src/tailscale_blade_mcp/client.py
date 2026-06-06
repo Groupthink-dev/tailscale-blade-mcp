@@ -334,15 +334,33 @@ class TailscaleClient:
     async def get_webhooks(self) -> list[dict[str, Any]]:
         """List webhooks."""
         data: dict[str, Any] = await self._request("GET", self._tailnet_path("webhooks"))
-        result: list[dict[str, Any]] = data.get("webhooks", [])
+        # Live API emits {"webhooks": null} (not []) for an empty tailnet, so the
+        # ``[]`` default never fires — ``or []`` collapses null → [] to honour the
+        # ``-> list`` contract (a bare null crashed the sorted() in ts_webhooks).
+        result: list[dict[str, Any]] = data.get("webhooks") or []
         return result
 
     # ------------------------------------------------------------------
     # Audit Logs
     # ------------------------------------------------------------------
 
-    async def get_audit_log(self, count: int = 50) -> list[dict[str, Any]]:
-        """Get configuration audit log entries."""
-        data: dict[str, Any] = await self._request("GET", self._tailnet_path(f"logging/configuration?count={count}"))
-        result: list[dict[str, Any]] = data.get("logs", [])
-        return result
+    async def get_audit_log(self, count: int = 50, days: int = 7) -> list[dict[str, Any]]:
+        """Get configuration audit log entries from the last ``days`` days.
+
+        The Tailscale logging endpoint requires an explicit ``start`` AND ``end``
+        RFC3339 window — it has **no** ``count`` parameter and returns ``400
+        "must specify a start/end query"`` without both. We send the computed
+        window, sort the returned entries most-recent-first, then truncate to
+        ``count`` client-side. Widening ``days`` on a busy tailnet risks the
+        30s request timeout, so the default window is deliberately narrow.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        end = datetime.now(UTC)
+        start = end - timedelta(days=days)
+        fmt = "%Y-%m-%dT%H:%M:%SZ"
+        path = self._tailnet_path(f"logging/configuration?start={start.strftime(fmt)}&end={end.strftime(fmt)}")
+        data: dict[str, Any] = await self._request("GET", path)
+        result: list[dict[str, Any]] = data.get("logs") or []
+        result.sort(key=lambda e: e.get("eventTime", ""), reverse=True)
+        return result[:count]

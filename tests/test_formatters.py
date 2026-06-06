@@ -193,10 +193,25 @@ class TestWebhookFormatters:
 class TestAuditLogFormatters:
     def test_audit_log(self, sample_audit_log: list[dict[str, Any]]) -> None:
         result = format_audit_log(sample_audit_log)
-        assert "2026-04-11" in result
+        assert "2026-06-06" in result
         assert "Alice" in result
-        assert "PolicyFileUpdated" in result
-        assert "DeviceAuthorized" in result
+        # DD-385 Phase 1: surface the action verb joined to the category, not the
+        # category alone — the live entry's meaningful field is ``action``.
+        assert "CONFIG.CREATE" in result
+        assert "CONFIG.DELETE" in result
+
+    def test_audit_log_action_verb_surfaced(self, sample_audit_log: list[dict[str, Any]]) -> None:
+        """Regression (DD-385 Phase 1): the verb (action) must reach the output.
+
+        The pre-fix formatter read only ``type`` ("CONFIG"), hiding whether an
+        entry was a CREATE/DELETE/REVOKE — the actionable signal in an audit log.
+        """
+        line = format_audit_log([sample_audit_log[0]])
+        assert "CREATE" in line
+
+    def test_audit_log_type_only_fallback(self) -> None:
+        """An entry with ``type`` but no ``action`` falls back to the category."""
+        assert "CONFIG" in format_audit_log([{"eventTime": "2026-06-06T00:00:00Z", "type": "CONFIG"}])
 
     def test_audit_log_empty(self) -> None:
         assert format_audit_log([]) == "(no audit log entries)"

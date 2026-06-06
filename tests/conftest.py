@@ -221,18 +221,31 @@ def sample_webhooks() -> list[dict[str, Any]]:
 
 @pytest.fixture()
 def sample_audit_log() -> list[dict[str, Any]]:
-    """Sample audit log entries."""
+    """Sample audit log entries — real Tailscale ``logging/configuration`` shape.
+
+    Captured live 2026-06-06 (DD-385 Phase 1): each entry carries ``type``
+    (category, e.g. CONFIG) AND ``action`` (the verb: CREATE/UPDATE/DELETE/
+    REVOKE), plus ``origin``/``eventGroupID``/``new``/``old``. The earlier
+    fixture invented a ``type: "PolicyFileUpdated"`` value that no live entry
+    ever emits — the kind of wrong-assumption mock this campaign exists to kill.
+    """
     return [
         {
-            "eventTime": "2026-04-11T10:00:00Z",
-            "type": "PolicyFileUpdated",
-            "actor": {"displayName": "Alice", "loginName": "alice@example.com"},
-            "target": {"name": "ACL policy"},
+            "eventTime": "2026-06-06T01:22:55Z",
+            "type": "CONFIG",
+            "action": "CREATE",
+            "origin": "CONFIG_API",
+            "eventGroupID": "abc123",
+            "actor": {"id": "u1", "type": "USER", "displayName": "Alice", "loginName": "alice@example.com"},
+            "target": {"id": "k1", "name": "Auth key", "type": "API_KEY"},
         },
         {
-            "eventTime": "2026-04-10T14:00:00Z",
-            "type": "DeviceAuthorized",
-            "actor": {"displayName": "Bob", "loginName": "bob@example.com"},
-            "target": {"name": "phone", "id": "55555"},
+            "eventTime": "2026-06-05T14:00:00Z",
+            "type": "CONFIG",
+            "action": "DELETE",
+            "origin": "ADMIN_CONSOLE",
+            "eventGroupID": "def456",
+            "actor": {"id": "u2", "type": "USER", "displayName": "Bob", "loginName": "bob@example.com"},
+            "target": {"id": "55555", "name": "phone", "type": "NODE"},
         },
     ]

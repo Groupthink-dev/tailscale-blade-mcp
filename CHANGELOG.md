@@ -6,6 +6,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-axis version scheme parallel to the rest of the
 Stallari platform (`major.macro.minor.patch`).
 
+## [0.8.0] - 2026-06-06
+
+### Fixed (DD-385 Phase 1 — live-hardening campaign)
+
+Two tools were **completely broken against a live tailnet** despite a green
+mocked suite — the mock encoded a wrong assumption about the wire shape. Found
+by capturing real responses from a live tailnet (the campaign method).
+
+- **`ts_audit_log` returned `400` on every call.** It sent `?count=N`, but the
+  Tailscale `logging/configuration` endpoint has no `count` param and **requires**
+  an explicit `start` AND `end` RFC3339 window (`400 must specify a "start"/"end"
+  query` otherwise). `get_audit_log` now computes a `start`/`end` window, sorts
+  entries most-recent-first, and truncates to `count` client-side. New `days`
+  tool arg (default 7, max 90) controls the lookback window; wider windows risk
+  the 30s API timeout.
+- **`ts_webhooks` crashed (`'NoneType' object is not iterable`) on any tailnet
+  with no webhooks** — the common case. The live API emits `{"webhooks": null}`
+  (not `[]`), so `.get("webhooks", [])` yielded `None`, which then broke the
+  tool's `sorted()`. `get_webhooks` now collapses null → `[]` to honour its
+  `-> list` contract.
+
+### Changed
+
+- **Audit-log lines now surface the action verb.** Live entries carry both
+  `type` (category, e.g. `CONFIG`) and `action` (the verb: `CREATE`/`DELETE`/
+  `REVOKE`/`UPDATE`); the formatter showed only the category. Lines now read
+  `CONFIG.CREATE` etc., with graceful fallback to whichever field is present.
+
+### Added
+
+- **Live e2e test tier** (`tests/test_e2e.py`, `-m e2e`, opt-in via
+  `TAILSCALE_E2E=1`). Locks in the two live-only regressions plus the
+  lowest-blast auth-key create→delete loop and the validate-only ACL round-trip.
+  ACL **apply** is deliberately *not* exercised here — lockout risk makes
+  `ts_acl_set` a throwaway-tailnet-only operation (DD-385 OQ-3; pending DD-382).
+
+### Verified clean (live schema capture, no change needed)
+
+- Device / user / key / settings / DNS / ACL-summary parse shapes all match the
+  live wire; ACL `validate` + `If-Match` ETag optimistic-concurrency plumbing
+  confirmed against the live API.
+
 ## [0.7.0] - 2026-06-03
 
 ### Added
