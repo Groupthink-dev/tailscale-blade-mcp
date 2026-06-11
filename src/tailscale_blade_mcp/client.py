@@ -175,7 +175,13 @@ class TailscaleClient:
         await self._request("POST", f"/device/{device_id}/tags", json={"tags": tags})
 
     async def set_device_routes(self, device_id: str, routes: list[str]) -> None:
-        """Set (approve) routes on a device."""
+        """Set the enabled subnet routes on a device.
+
+        The Tailscale v2 set-routes endpoint has REPLACE semantics: the
+        device's enabled-route set becomes exactly ``routes``. Any currently
+        enabled route not listed is silently de-approved. Callers wanting
+        additive approval must read-merge first (see ``ts_approve_routes``).
+        """
         await self._request("POST", f"/device/{device_id}/routes", json={"routes": routes})
 
     async def delete_device(self, device_id: str) -> None:

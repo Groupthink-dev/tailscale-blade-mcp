@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to a 4-axis version scheme parallel to the rest of the
 Stallari platform (`major.macro.minor.patch`).
 
+## [0.9.0] - 2026-06-11
+
+### Fixed (AUD-04-38 — DD-385 Phase W wave 2)
+
+- **`ts_approve_routes` no longer silently de-approves existing routes.** The
+  Tailscale v2 set-routes endpoint has REPLACE semantics, so the natural call
+  `routes=[new_subnet]` wiped every previously-approved route on the device —
+  instant subnet connectivity loss. The tool now read-merges: it GETs the
+  device's currently-enabled routes and POSTs the union, preserving existing
+  approvals. A new `replace: bool = false` parameter opts back into the old
+  replace semantics (clearly documented as able to disconnect subnets).
+  `client.set_device_routes` docstring now states the REPLACE semantics
+  honestly.
+
 ## [0.8.0] - 2026-06-06
 
 ### Fixed (DD-385 Phase 1 — live-hardening campaign)

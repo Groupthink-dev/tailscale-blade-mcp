@@ -1,5 +1,5 @@
 name: tailscale-blade-mcp
-version: "0.3.0"
+version: "0.9.0"
 description: >
   Network monitoring and security for Tailscale tailnets.
   Device inventory, ACL policy review, DNS configuration, auth key auditing,

@@ -842,14 +842,49 @@ async def ts_expire_device(
 async def ts_approve_routes(
     device_id: Annotated[str, Field(description="Device nodeId (from ts_devices)")],
     routes: Annotated[list[str], Field(description="Subnet routes to approve (e.g. ['192.168.1.0/24'])")],
+    replace: Annotated[
+        bool,
+        Field(
+            description=(
+                "Replace the device's entire enabled-route set with exactly `routes` "
+                "instead of additively approving. WARNING: replace=true de-approves "
+                "every currently-enabled route not listed — this can disconnect subnets."
+            )
+        ),
+    ] = False,
 ) -> str:
-    """Approve subnet routes on a device. Requires TAILSCALE_WRITE_ENABLED=true."""
+    """Approve subnet routes on a device. Requires TAILSCALE_WRITE_ENABLED=true.
+
+    Default (``replace=false``): additive — reads the device's currently
+    enabled routes first and approves the union, so previously approved
+    routes are preserved.
+
+    ``replace=true``: raw Tailscale set-routes REPLACE semantics — the
+    enabled set becomes exactly ``routes``; any currently enabled route not
+    listed is de-approved, which can sever subnet connectivity. Use only
+    when you intend to remove approvals.
+    """
     gate = require_write()
     if gate:
         return gate
     try:
-        await _get_client().set_device_routes(device_id, routes)
-        return f"Set routes on {device_id}: {', '.join(routes)}"
+        client = _get_client()
+        if replace:
+            await client.set_device_routes(device_id, list(routes))
+            return (
+                f"Replaced enabled routes on {device_id}: {', '.join(routes) or '(none)'}"
+                " (replace=true — previously enabled routes not listed are de-approved)"
+            )
+        current = await client.get_device_routes(device_id)
+        enabled: list[str] = current.get("enabledRoutes", []) or []
+        # Order-stable union: existing approvals first, then newly requested.
+        merged = list(dict.fromkeys([*enabled, *routes]))
+        await client.set_device_routes(device_id, merged)
+        newly = [r for r in routes if r not in enabled]
+        return (
+            f"Approved routes on {device_id}: {', '.join(merged)}"
+            f" ({len(newly)} newly approved, {len(enabled)} preserved)"
+        )
     except TailscaleError as e:
         return _error_response(e)
 
